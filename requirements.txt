@@ -1,0 +1,21 @@
+# Python dependencies
+opencv-python>=4.5.0
+numpy>=1.19.0
+Pillow>=8.0.0
+flask>=2.0.0
+requests>=2.25.0
+ollama>=0.1.0
+openai-whisper>=20231117
+sounddevice>=0.4.0
+scipy>=1.7.0
+torch>=2.0.0
+torchaudio>=2.0.0
+python-dotenv>=0.19.0
+rapidfuzz
+urllib3
+pyzmq>=25.1.0
+
+# System dependencies (not installed by pip):
+# - ffmpeg (for Whisper)
+# - Meta Project Aria Client SDK (see Meta documentation)
+# - Ollama (https://ollama.com/) for Qwen2.5VL model (requires Ollama 0.7.0 or later)
