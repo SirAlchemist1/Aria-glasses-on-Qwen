@@ -1,6 +1,6 @@
 # Aria Glasses Qwen2.5VL Assistive AI
 
-## Project Overview
+## Project Overview 2.0
 - Real-time captioning and Q&A pipeline for visually impaired users using Meta Project Aria glasses
 - Uses Qwen2.5VL vision-language model (via Ollama) for image captioning and follow-up Q&A
 - Runs locally on macOS (Apple Silicon), designed for extensibility
