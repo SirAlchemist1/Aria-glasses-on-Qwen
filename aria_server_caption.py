@@ -20,6 +20,9 @@ import scipy.io.wavfile as wavfile
 #Wake word inputs
 import wake_word #make sure wake_word.py is in same folder
 
+# --- Sensor integration ---
+from sensors import SensorCollector, calc_depth, build_prompt
+
 warnings.filterwarnings("ignore", message="FP16 is not supported on CPU; using FP32 instead")
 
 # === Initialize Ollama client ===
@@ -74,9 +77,9 @@ def log_event(message, logfile="wake_log.txt"):
     #with open(logfile, "a") as f:
     #    f.write(f"[{timestamp}] {message}\n")
 
-# === Streaming Observer Class ===
-class StreamingObserver:
+class CombinedObserver(SensorCollector):
     def __init__(self):
+        super().__init__()
         self.last_image = None
         self.last_caption_time = 0
         self.cooldown = 10  # seconds between captions **CHANGE IF NEEDED**
@@ -87,7 +90,7 @@ class StreamingObserver:
         self.caption_pause = False #flag for pausing caption when answering question
         self.caption_enabled = False # Only allow captioning after wake word
 
-    def on_image_received(self, image: np.ndarray, record: ImageDataRecord):
+    def on_image_received(self, image, record):
         if record.camera_id == aria.CameraId.Rgb:
             self.last_image = np.rot90(image, -1)
             self.maybe_caption()
@@ -124,7 +127,7 @@ class StreamingObserver:
             self.caption_in_progress = False
             self.caption_enabled = False # Require wake word again for next caption
 
-    def generate_caption(self, np_img: np.ndarray) -> str:
+    def generate_caption(self, np_img):
         try:
             #convert numpy image to PIL and encode as PNG in memory
             image = Image.fromarray(np_img).convert("RGB")
@@ -132,11 +135,24 @@ class StreamingObserver:
             image.save(buffer, format="PNG")
             buffer.seek(0)
 
-            #send image to Flask caption server (make sure server is running)
+            # --- Sensor context injection ---
+            context_hint = None
+            try:
+                # Use the freshest sensor packet from the main loop if available
+                # For this call, pass None for image_path, but use lux and depth from the main loop
+                # (Assume self.lux and self.depth are set in the main loop, or pass as args if refactored)
+                context_hint = build_prompt(None, getattr(self, 'lux', None), getattr(self, 'depth', None))
+            except Exception:
+                pass
+
             files = {'image': ('frame.png', buffer, 'image/png')}
+            data = {}
+            if context_hint:
+                data['context_hint'] = context_hint
             response = requests.post(
                 "http://127.0.0.1:8000/caption",
                 files=files,
+                data=data,
                 timeout=15  # seconds till timeout. adjust as needed
             )
 
@@ -214,7 +230,7 @@ config.security_options = options
 streaming_client.subscription_config = config
 
 # === Observer & Streaming Start ===
-observer = StreamingObserver()
+observer = CombinedObserver()
 
 # === Initialize text to speech queue and worker ===
 def tts_worker():
@@ -250,7 +266,7 @@ cv2.namedWindow("Aria RGB + Qwen2.5VL Caption", cv2.WINDOW_NORMAL)
 cv2.resizeWindow("Aria RGB + Qwen2.5VL Caption", 640, 480)
 
 # === Launch user input thread for follow-up questions ===
-def follow_up_input_loop(observer: StreamingObserver):
+def follow_up_input_loop(observer: CombinedObserver):
     try:
         while True:
             # ------- choose input mode -------
@@ -307,7 +323,7 @@ def follow_up_input_loop(observer: StreamingObserver):
         tts_queue.put(None)
         sys.exit(0)
 
-def follow_up_on_wake(observer: StreamingObserver):
+def follow_up_on_wake(observer: CombinedObserver):
     while True:
         wake_word.wait_for_wake_word(stt_model)
         log_event("Wake word detected.")
@@ -341,7 +357,14 @@ try:
     while True:
         if observer.last_image is not None:
             frame = cv2.cvtColor(observer.last_image, cv2.COLOR_RGB2BGR)
-            #display caption in window
+            lux = None
+            depth = None
+            if observer is not None:
+                imu_pkt, lux_val = observer.get_latest()
+                lux = lux_val
+                depth = calc_depth(frame, imu_pkt)
+            observer.lux = lux
+            observer.depth = depth
             caption_display = observer.caption[:80] + "..." if len(observer.caption) > 80 else observer.caption
             cv2.putText(
                 frame,
@@ -356,7 +379,6 @@ try:
             cv2.imshow("Aria RGB + Qwen2.5VL Caption", frame)
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
-        
         time.sleep(0.01)#sleep for 10ms
 
 except KeyboardInterrupt:

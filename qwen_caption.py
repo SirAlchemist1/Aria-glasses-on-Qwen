@@ -15,11 +15,41 @@ import io
 import threading
 import queue
 import os
+import re
+from sensors import SensorCollector, calc_depth, build_prompt
 
 # === Initialize Ollama client ===
 print("Connecting to Ollama...")
 client = Client()
 print("Qwen2.5VL (Ollama) client initialized.")
+
+# === User Step Length (meters) ===
+USER_STEP_LENGTH = 0.7  # Default average step length in meters; can be user-configurable
+
+def distance_to_steps(distance_m, step_length=USER_STEP_LENGTH):
+    if distance_m is None or step_length <= 0:
+        return None
+    steps = int(round(distance_m / step_length))
+    return steps if steps > 0 else 1
+
+def extract_distance(text):
+    m = re.search(r"([0-9]+\.?[0-9]*)\s*(meters|meter|m)", text)
+    if m:
+        return float(m.group(1)), 'm'
+    m = re.search(r"([0-9]+\.?[0-9]*)\s*(feet|foot|ft)", text)
+    if m:
+        return float(m.group(1)) * 0.3048, 'ft'
+    return None, None
+
+def append_steps_to_caption(caption, step_length=USER_STEP_LENGTH):
+    distance_m, unit = extract_distance(caption)
+    if distance_m is not None:
+        steps = distance_to_steps(distance_m, step_length)
+        if steps:
+            m = re.search(r"(door|object|exit|stairs|sign)", caption, re.IGNORECASE)
+            obj = m.group(1) if m else "object"
+            return f"{caption} The nearest {obj} seems to be about {steps} steps away."
+    return caption
 
 # === Streaming Observer Class ===
 class StreamingObserver:
@@ -55,6 +85,8 @@ class StreamingObserver:
             caption = self.generate_caption(image)
             duration = time.time() - start
 
+            # --- Add step conversion logic ---
+            caption = append_steps_to_caption(caption)
             self.caption = caption
             print("Caption from Qwen2.5VL:", caption)
             print(f"Caption generation took {duration:.2f} seconds")
@@ -145,7 +177,8 @@ def tts_worker():
 tts_thread = threading.Thread(target=tts_worker, daemon=True)
 tts_thread.start()
 
-streaming_client.set_streaming_client_observer(observer)
+sensor_observer = SensorCollector()
+streaming_client.set_streaming_client_observer(sensor_observer)
 streaming_client.subscribe()
 print("Connected to Aria. Streaming started.")
 
@@ -157,10 +190,20 @@ try:
     while True:
         if observer.last_image is not None:
             frame = cv2.cvtColor(observer.last_image, cv2.COLOR_RGB2BGR)
+            # --- Sensor fetch ---
+            context_hint = None
+            if sensor_observer is not None:
+                imu_pkt, lux_val = sensor_observer.get_latest()
+                lux = lux_val
+                depth = calc_depth(frame, imu_pkt)
+                context_hint = build_prompt(None, lux, depth)
             # Draw caption
+            display_caption = observer.caption
+            if context_hint:
+                display_caption = f"{context_hint} {observer.caption}"
             cv2.putText(
                 frame,
-                observer.caption,
+                display_caption,
                 (30, 30),
                 cv2.FONT_HERSHEY_SIMPLEX,
                 0.8,
@@ -171,7 +214,6 @@ try:
             cv2.imshow("Aria RGB + Qwen2.5VL Caption", frame)
         if cv2.waitKey(1) & 0xFF == ord("q"):
             break
-        
         time.sleep(0.01)  # Sleep for 10ms
 
 except KeyboardInterrupt:
